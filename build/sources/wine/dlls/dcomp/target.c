@@ -1,0 +1,150 @@
+/*
+ * Copyright 2023 Zhiyi Zhang for CodeWeavers
+ * Copyright 2026 Porthole contributors
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#include <stdarg.h>
+
+#define COBJMACROS
+#include "windef.h"
+#include "winbase.h"
+#include "dcomp_private.h"
+#include "wine/debug.h"
+
+WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
+
+static HRESULT STDMETHODCALLTYPE target_QueryInterface(IDCompositionTarget *iface, REFIID iid, void **out)
+{
+    TRACE("iface %p, iid %s, out %p\n", iface, debugstr_guid(iid), out);
+
+    if (IsEqualGUID(iid, &IID_IUnknown)
+            || IsEqualGUID(iid, &IID_IDCompositionTarget))
+    {
+        IUnknown_AddRef(iface);
+        *out = iface;
+        return S_OK;
+    }
+
+    FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE target_AddRef(IDCompositionTarget *iface)
+{
+    struct composition_target *target = impl_from_IDCompositionTarget(iface);
+    ULONG ref = InterlockedIncrement(&target->ref);
+
+    TRACE("iface %p, ref %lu.\n", iface, ref);
+    return ref;
+}
+
+static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
+{
+    struct composition_target *target = impl_from_IDCompositionTarget(iface);
+    ULONG ref = InterlockedDecrement(&target->ref);
+    struct composition_visual *root_visual;
+
+    TRACE("iface %p, ref %lu.\n", iface, ref);
+
+    if (!ref)
+    {
+        struct composition_device *device = impl_from_IDCompositionDevice(target->device);
+
+        EnterCriticalSection(&device->cs);
+        list_remove(&target->entry);
+        LeaveCriticalSection(&device->cs);
+        IDCompositionDevice_Release(target->device);
+        if (target->root)
+        {
+            root_visual = impl_from_IDCompositionVisual(target->root);
+            root_visual->is_root = FALSE;
+            IDCompositionVisual_Release(target->root);
+        }
+        free(target);
+    }
+
+    return ref;
+}
+
+static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
+        IDCompositionVisual *visual)
+{
+    struct composition_target *target = impl_from_IDCompositionTarget(iface);
+    struct composition_visual *composition_visual;
+
+    TRACE("iface %p, visual %p\n", iface, visual);
+
+    if (visual)
+    {
+        composition_visual = impl_from_IDCompositionVisual(visual);
+        if (composition_visual->is_root)
+            return E_INVALIDARG;
+
+        composition_visual->is_root = TRUE;
+        IDCompositionVisual_AddRef(visual);
+    }
+
+    if (target->root)
+    {
+        composition_visual = impl_from_IDCompositionVisual(target->root);
+        composition_visual->is_root = FALSE;
+        IDCompositionVisual_Release(target->root);
+    }
+    target->root = visual;
+    return S_OK;
+}
+
+static const struct IDCompositionTargetVtbl target_vtbl =
+{
+    /* IUnknown methods */
+    target_QueryInterface,
+    target_AddRef,
+    target_Release,
+    /* IDCompositionTarget methods */
+    target_SetRoot,
+};
+
+HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost,
+        IDCompositionTarget **new_target)
+{
+    struct composition_target *target;
+    DWORD pid = 0;
+
+    if (!hwnd || hwnd == GetDesktopWindow() || !new_target)
+        return E_INVALIDARG;
+
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != GetCurrentProcessId())
+        return E_ACCESSDENIED;
+
+    target = calloc(1, sizeof(*target));
+    if (!target)
+        return E_OUTOFMEMORY;
+
+    IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
+    EnterCriticalSection(&device->cs);
+    list_add_tail(&device->targets, &target->entry);
+    LeaveCriticalSection(&device->cs);
+    target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
+    target->ref = 1;
+    target->hwnd = hwnd;
+    target->topmost = topmost;
+    target->device = &device->IDCompositionDevice_iface;
+    *new_target = &target->IDCompositionTarget_iface;
+    return S_OK;
+}
