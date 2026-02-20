@@ -7,7 +7,9 @@ if [ "$(uname -m)" != "x86_64" ]; then
     exec arch -x86_64 /bin/bash "$0" "$@"
 fi
 
-X86PREFIX=/Users/james/personal/porthole/x86brew
+PORTHOLE_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+X86PREFIX="$PORTHOLE_DIR/x86brew"
 MOLTENVK=$X86PREFIX/var/homebrew/tmp/.cellar/molten-vk/1.4.0
 MINGW_I686=$X86PREFIX/Cellar/mingw-w64/13.0.0_2/toolchain-i686/bin
 MINGW_X64=$X86PREFIX/Cellar/mingw-w64/13.0.0_2/toolchain-x86_64/bin
@@ -22,8 +24,8 @@ export LDFLAGS="-Wl,-headerpad_max_install_names -L$X86PREFIX/lib -L$X86PREFIX/o
 export CPPFLAGS="-I$X86PREFIX/include -I$X86PREFIX/opt/gnutls/include -I$X86PREFIX/opt/freetype/include -I$X86PREFIX/opt/sdl2/include -I$MOLTENVK/libexec/include"
 export CROSSCFLAGS="-g -O2"
 
-BUILDDIR=/Users/james/personal/porthole/build/wine-x86_64-build
-SRCDIR=/Users/james/personal/porthole/sources/wine
+BUILDDIR="$PORTHOLE_DIR/build/wine-x86_64-build"
+SRCDIR="$PORTHOLE_DIR/sources/wine"
 
 mkdir -p "$BUILDDIR"
 cd "$BUILDDIR"
@@ -48,7 +50,7 @@ echo "=== Building Wine x86_64 ==="
 make -j$(sysctl -n hw.ncpu)
 
 echo "=== Installing Wine x86_64 ==="
-make install-lib DESTDIR=/Users/james/personal/porthole/install-x86_64
+make install-lib DESTDIR="$PORTHOLE_DIR/install-x86_64"
 
 echo "=== Done ==="
-file /Users/james/personal/porthole/install-x86_64/usr/local/bin/wine
+file "$PORTHOLE_DIR/install-x86_64/usr/local/bin/wine"
