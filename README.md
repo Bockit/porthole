@@ -10,7 +10,7 @@ Currently targets 32-bit Windows games like Civilization IV: Beyond the Sword.
 
 - macOS on Apple Silicon (M1/M2/M3/M4)
 - Rosetta 2 (`softwareupdate --install-rosetta`)
-- CrossOver 26.0.0 source tarball extracted to `build/sources/wine/`
+- CrossOver 26.0.0 source tarball extracted to `sources/wine/`
 
 ## Project Structure
 
@@ -19,8 +19,9 @@ porthole/
 ├── build_x86_64.sh         # Build Wine from source (x86_64 via Rosetta)
 ├── run_wine.sh             # Launch Wine with correct env vars
 ├── install_dxvk.sh         # Install DXVK DLLs into Wine prefix
+├── sources/
+│   └── wine/               # CrossOver/Wine source tree
 ├── build/
-│   ├── sources/wine/       # CrossOver/Wine source tree
 │   └── wine-x86_64-build/  # Out-of-source build directory
 ├── install-x86_64/         # Built Wine binaries (DESTDIR)
 │   └── usr/local/bin/wine
@@ -65,7 +66,7 @@ The build uses `/bin/bash` explicitly (not `bash`) because Homebrew's bash is AR
 
 ### Rebuilding a Single DLL
 
-After modifying Wine source (e.g. `build/sources/wine/dlls/dcomp/`):
+After modifying Wine source (e.g. `sources/wine/dlls/dcomp/`):
 
 ```bash
 cd build/wine-x86_64-build

@@ -5,15 +5,15 @@
 ## What Was Implemented
 
 ### Phase 1: DComp COM Objects (Working)
-- `build/sources/wine/dlls/dcomp/device.c` - Full IDCompositionDevice/IDCompositionDesktopDevice with dual vtables
-- `build/sources/wine/dlls/dcomp/visual.c` - IDCompositionVisual2 with visual tree (AddVisual/RemoveVisual/SetContent)
-- `build/sources/wine/dlls/dcomp/target.c` - IDCompositionTarget with SetRoot
-- `build/sources/wine/dlls/dcomp/dcomp_private.h` - Shared structs and declarations
-- `build/sources/wine/dlls/dcomp/Makefile.in` - Build config with `IMPORTS = user32` and `--prefer-native`
+- `sources/wine/dlls/dcomp/device.c` - Full IDCompositionDevice/IDCompositionDesktopDevice with dual vtables
+- `sources/wine/dlls/dcomp/visual.c` - IDCompositionVisual2 with visual tree (AddVisual/RemoveVisual/SetContent)
+- `sources/wine/dlls/dcomp/target.c` - IDCompositionTarget with SetRoot
+- `sources/wine/dlls/dcomp/dcomp_private.h` - Shared structs and declarations
+- `sources/wine/dlls/dcomp/Makefile.in` - Build config with `IMPORTS = user32` and `--prefer-native`
 - `tests/test_dcomp_minimal.c` - 26/26 tests passing (SSH-friendly, no D3D needed)
 
 ### Phase 2: CreateSwapChainForComposition (Working)
-- `build/sources/wine/dlls/dxgi/factory.c` - Creates hidden WS_POPUP window, delegates to CreateSwapChainForHwnd
+- `sources/wine/dlls/dxgi/factory.c` - Creates hidden WS_POPUP window, delegates to CreateSwapChainForHwnd
 - Note: Wine's builtin dxgi.dll handles this, NOT DXVK (DXVK's dxgi.dll is not installed)
 
 ### Phase 3: Compositing Bridge (Broken - see problems below)
@@ -74,12 +74,12 @@ CEF queries for `{df0c7cec-cdeb-4d4a-b91c-721bf22f4e6c}` which we return E_NOINT
 
 | File | What |
 |------|------|
-| `build/sources/wine/dlls/dcomp/device.c` | DComp device, compositor, exported DCompositionCreateDevice* |
-| `build/sources/wine/dlls/dcomp/visual.c` | Visual tree implementation |
-| `build/sources/wine/dlls/dcomp/target.c` | Composition target |
-| `build/sources/wine/dlls/dcomp/dcomp_private.h` | Shared structs/GUIDs |
-| `build/sources/wine/dlls/dcomp/Makefile.in` | Build config |
-| `build/sources/wine/dlls/dxgi/factory.c` | CreateSwapChainForComposition implementation |
+| `sources/wine/dlls/dcomp/device.c` | DComp device, compositor, exported DCompositionCreateDevice* |
+| `sources/wine/dlls/dcomp/visual.c` | Visual tree implementation |
+| `sources/wine/dlls/dcomp/target.c` | Composition target |
+| `sources/wine/dlls/dcomp/dcomp_private.h` | Shared structs/GUIDs |
+| `sources/wine/dlls/dcomp/Makefile.in` | Build config |
+| `sources/wine/dlls/dxgi/factory.c` | CreateSwapChainForComposition implementation |
 | `tests/test_dcomp_minimal.c` | Unit tests (26/26 pass) |
 
 ## Next Steps

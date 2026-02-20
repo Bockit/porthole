@@ -23,7 +23,7 @@ export CPPFLAGS="-I$X86PREFIX/include -I$X86PREFIX/opt/gnutls/include -I$X86PREF
 export CROSSCFLAGS="-g -O2"
 
 BUILDDIR=/Users/james/personal/porthole/build/wine-x86_64-build
-SRCDIR=/Users/james/personal/porthole/build/sources/wine
+SRCDIR=/Users/james/personal/porthole/sources/wine
 
 mkdir -p "$BUILDDIR"
 cd "$BUILDDIR"

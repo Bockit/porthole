@@ -418,13 +418,13 @@ export PATH="$X86PREFIX/bin:$PATH"
 ### Step 4: Build Wine as x86_64
 
 ```bash
-# Use the existing CX26 source at build/sources/wine
+# Use the existing CX26 source at sources/wine
 cd /Users/james/personal/porthole
 
 mkdir -p build/wine-x86_64-build
 cd build/wine-x86_64-build
 
-arch -x86_64 ../../build/sources/wine/configure \
+arch -x86_64 ../../sources/wine/configure \
     --enable-archs=i386,x86_64 \
     --disable-winedbg \
     --disable-tests \
@@ -564,11 +564,11 @@ Zhiyi Zhang (CodeWeavers) has a working partial implementation on his personal W
 Port Zhiyi's code into our CX26 source tree, then extend it:
 
 **Files to create/modify:**
-- `build/sources/wine/dlls/dcomp/device.c` — replace current stubs with full implementation
-- `build/sources/wine/dlls/dcomp/target.c` — new file (from Zhiyi's branch)
-- `build/sources/wine/dlls/dcomp/visual.c` — new file (from Zhiyi's branch)
-- `build/sources/wine/dlls/dcomp/dcomp_private.h` — new file (from Zhiyi's branch)
-- `build/sources/wine/dlls/dcomp/Makefile.in` — add new sources + imports
+- `sources/wine/dlls/dcomp/device.c` — replace current stubs with full implementation
+- `sources/wine/dlls/dcomp/target.c` — new file (from Zhiyi's branch)
+- `sources/wine/dlls/dcomp/visual.c` — new file (from Zhiyi's branch)
+- `sources/wine/dlls/dcomp/dcomp_private.h` — new file (from Zhiyi's branch)
+- `sources/wine/dlls/dcomp/Makefile.in` — add new sources + imports
 
 **Additions beyond Zhiyi's code:**
 1. Add `DCompositionCreateDevice3()` — calls `create_device(3, iid, device)`
@@ -583,7 +583,7 @@ Port Zhiyi's code into our CX26 source tree, then extend it:
 #### Phase 2: Composition Swap Chains (DXVK)
 
 **File to modify:**
-- `build/sources/dxvk/src/dxgi/dxgi_factory.cpp` — `CreateSwapChainForComposition`
+- `sources/dxvk/src/dxgi/dxgi_factory.cpp` — `CreateSwapChainForComposition`
 
 **Approach**: Redirect `CreateSwapChainForComposition` to create a swap chain backed by a hidden helper window. DComp's `Commit()` (via BitBlt) will copy the rendered content to the real target HWND.
 
