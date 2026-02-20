@@ -1,5 +1,6 @@
-# Reference repos
+# Reference repos (cloned by setup_references.sh)
 whisky/
+references/
 
 # x86_64 Homebrew toolchain (large, machine-specific)
 x86brew/
