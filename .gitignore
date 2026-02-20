@@ -29,3 +29,6 @@ tests/*.exe
 
 # RPI thoughts/
 thoughts/
+
+# Crossover 26
+crossover-26.0.0.tar.gz

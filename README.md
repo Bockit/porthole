@@ -39,7 +39,7 @@ All build dependencies live in an isolated x86_64 Homebrew prefix at `x86brew/`,
 
 ```bash
 # Bootstrap x86_64 Homebrew into the project directory
-arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" -- --prefix="$(pwd)/x86brew"
+git clone https://github.com/Homebrew/brew x86brew
 
 # Install build dependencies
 arch -x86_64 x86brew/bin/brew install mingw-w64 bison flex freetype gnutls sdl2
@@ -55,6 +55,7 @@ arch -x86_64 x86brew/bin/brew install molten-vk
 ```
 
 This script:
+
 1. Re-executes itself under `arch -x86_64` if needed (Rosetta)
 2. Sets PATH/CFLAGS/LDFLAGS to use only the x86brew toolchain
 3. Configures Wine with `--enable-archs=i386,x86_64` (WoW64 for 32-bit games)
@@ -105,6 +106,7 @@ WINEDEBUG=+dcomp ./run_wine.sh path/to/program.exe
 ```
 
 `run_wine.sh` sets up the runtime environment:
+
 - `WINEPREFIX=~/.porthole-wine`
 - `DYLD_FALLBACK_LIBRARY_PATH` pointing to MoltenVK, freetype, gnutls, sdl2
 - `VK_ICD_FILENAMES` pointing to MoltenVK's Vulkan ICD
