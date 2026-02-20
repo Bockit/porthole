@@ -4,11 +4,15 @@ whisky/
 # x86_64 Homebrew toolchain (large, machine-specific)
 x86brew/
 
-# Build artifacts
+# Build artifacts and directories
 build/wine-x86_64-build/
+build/wine64-build/
 build/crossover-*.tar.gz
 install/
 install-x86_64/
+
+# Wine/CrossOver source tree (our patches are already tracked)
+build/sources/
 
 # DXVK pre-built DLLs
 dxvk/
