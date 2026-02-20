@@ -17,6 +17,7 @@ BISON=$X86PREFIX/opt/bison/bin
 FLEX=$X86PREFIX/opt/flex/bin
 
 export PATH="$MINGW_I686:$MINGW_X64:$BISON:$FLEX:$X86PREFIX/bin:$PATH"
+export PKG_CONFIG="$X86PREFIX/bin/pkg-config"
 export PKG_CONFIG_PATH="$X86PREFIX/lib/pkgconfig:$X86PREFIX/opt/freetype/lib/pkgconfig:$X86PREFIX/opt/gnutls/lib/pkgconfig:$X86PREFIX/opt/sdl2/lib/pkgconfig:$X86PREFIX/opt/openssl@3/lib/pkgconfig"
 export MACOSX_DEPLOYMENT_TARGET=10.14
 export CFLAGS="-g -O2 -Wno-implicit-function-declaration -Wno-deprecated-declarations -Wno-format -I$MOLTENVK/libexec/include"
