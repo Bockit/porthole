@@ -1,0 +1,23 @@
+# Reference repos
+whisky/
+
+# x86_64 Homebrew toolchain (large, machine-specific)
+x86brew/
+
+# Build artifacts
+build/wine-x86_64-build/
+build/crossover-*.tar.gz
+install/
+install-x86_64/
+
+# DXVK pre-built DLLs
+dxvk/
+
+# SteamCMD and game files
+steamcmd/
+
+# Wine prefix
+.porthole-wine/
+
+# Compiled test binaries
+tests/*.exe
