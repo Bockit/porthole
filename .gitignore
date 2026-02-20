@@ -25,3 +25,6 @@ steamcmd/
 
 # Compiled test binaries
 tests/*.exe
+
+# RPI thoughts/
+thoughts/
