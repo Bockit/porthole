@@ -10,7 +10,7 @@ fi
 PORTHOLE_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 X86PREFIX="$PORTHOLE_DIR/x86brew"
-MOLTENVK=$X86PREFIX/var/homebrew/tmp/.cellar/molten-vk/1.4.0
+MOLTENVK=$X86PREFIX/Cellar/molten-vk/1.4.0
 MINGW_I686=$X86PREFIX/Cellar/mingw-w64/13.0.0_2/toolchain-i686/bin
 MINGW_X64=$X86PREFIX/Cellar/mingw-w64/13.0.0_2/toolchain-x86_64/bin
 BISON=$X86PREFIX/opt/bison/bin
