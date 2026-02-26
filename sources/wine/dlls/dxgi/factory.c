@@ -392,9 +392,29 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
     if (!device || !desc || !swapchain)
         return DXGI_ERROR_INVALID_CALL;
 
-    /* Composition swap chains render offscreen. Create a hidden message-only
-     * window so we can reuse the existing CreateSwapChainForHwnd path.
-     * DComp's Commit() handles blitting to the real target HWND. */
+    /* Ask dcomp.dll if this thread has a composition target HWND.
+     * If so, create the swap chain directly for that window so MoltenVK attaches
+     * its CAMetalLayer to the right NSView from the start — reparenting doesn't
+     * move the Metal layer on macOS. */
+    {
+        typedef HWND (__cdecl *PFN_get_target_hwnd)(void);
+        HMODULE dcomp = GetModuleHandleW(L"dcomp.dll");
+        if (dcomp)
+        {
+            PFN_get_target_hwnd get_hwnd = (PFN_get_target_hwnd)GetProcAddress(dcomp, "__wine_dcomp_get_target_hwnd");
+            if (get_hwnd)
+            {
+                HWND comp_hwnd = get_hwnd();
+                if (comp_hwnd && IsWindow(comp_hwnd))
+                {
+                    TRACE("using DComp target hwnd %p directly for composition swap chain\n", comp_hwnd);
+                    return dxgi_factory_CreateSwapChainForHwnd(iface, device, comp_hwnd, desc, NULL, output, swapchain);
+                }
+            }
+        }
+    }
+
+    /* Fallback: create a hidden window and let DComp's Commit() handle compositing. */
     if (!class_registered)
     {
         WNDCLASSW wc = {0};

@@ -123,14 +123,12 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
         IDCompositionTarget **new_target)
 {
     struct composition_target *target;
-    DWORD pid = 0;
 
     if (!hwnd || hwnd == GetDesktopWindow() || !new_target)
         return E_INVALIDARG;
 
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (pid != GetCurrentProcessId())
-        return E_ACCESSDENIED;
+    if (!IsWindow(hwnd))
+        return E_INVALIDARG;
 
     target = calloc(1, sizeof(*target));
     if (!target)
@@ -146,5 +144,10 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     target->topmost = topmost;
     target->device = &device->IDCompositionDevice_iface;
     *new_target = &target->IDCompositionTarget_iface;
+
+    /* Tell CreateSwapChainForComposition which window to render into on this thread. */
+    dcomp_set_current_target_hwnd(hwnd);
+    TRACE("set composition target hwnd %p for current thread\n", hwnd);
+
     return S_OK;
 }

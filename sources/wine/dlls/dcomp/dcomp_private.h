@@ -95,4 +95,9 @@ static inline struct composition_visual *impl_from_IDCompositionVisual2(IDCompos
 HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost, IDCompositionTarget **target);
 HRESULT create_visual(int version, REFIID iid, void **visual);
 
+/* Store the HWND of the most recently created composition target for this thread.
+ * Called from create_target(); read by __wine_dcomp_get_target_hwnd() in factory.c
+ * so that CreateSwapChainForComposition can create the swap chain for the right window. */
+void dcomp_set_current_target_hwnd(HWND hwnd);
+
 #endif /* __WINE_DCOMP_PRIVATE_H */
