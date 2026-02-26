@@ -32,6 +32,37 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
+/* Thread-local storage: HWND of the most recently created composition target on this thread.
+ * Set by CreateTargetForHwnd, read by __wine_dcomp_get_target_hwnd() which factory.c calls
+ * so that CreateSwapChainForComposition can target the right window from the start. */
+static LONG tls_target_hwnd_index = -1; /* -1 == TLS_OUT_OF_INDEXES */
+
+static DWORD get_tls_index(void)
+{
+    if (tls_target_hwnd_index == -1)
+    {
+        DWORD idx = TlsAlloc();
+        if (InterlockedCompareExchange(&tls_target_hwnd_index, (LONG)idx, -1) != -1)
+            TlsFree(idx); /* another thread beat us to it */
+    }
+    return (DWORD)tls_target_hwnd_index;
+}
+
+void dcomp_set_current_target_hwnd(HWND hwnd)
+{
+    DWORD idx = get_tls_index();
+    if (idx != TLS_OUT_OF_INDEXES)
+        TlsSetValue(idx, (LPVOID)hwnd);
+}
+
+HWND CDECL __wine_dcomp_get_target_hwnd(void)
+{
+    DWORD idx = get_tls_index();
+    if (idx == TLS_OUT_OF_INDEXES)
+        return NULL;
+    return (HWND)TlsGetValue(idx);
+}
+
 /*
  * IDCompositionDevice (v1) vtable implementation
  *
@@ -72,11 +103,11 @@ static HRESULT STDMETHODCALLTYPE device1_QueryInterface(IDCompositionDevice *ifa
         return S_OK;
     }
 
-    if (device->version >= 3 && IsEqualGUID(iid, &IID_IDCompositionDevice3))
+    if (IsEqualGUID(iid, &IID_IDCompositionDevice3))
     {
-        IUnknown_AddRef(&device->IDCompositionDesktopDevice_iface);
-        *out = &device->IDCompositionDesktopDevice_iface;
-        return S_OK;
+        FIXME("IDCompositionDevice3 not implemented, returning E_NOINTERFACE.\n");
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
@@ -134,51 +165,46 @@ static struct composition_visual *find_content_visual(struct composition_visual 
     return NULL;
 }
 
-static void do_composite(struct composition_target *target)
+/* Maximum number of composition targets processed per Commit. */
+#define MAX_COMPOSITE_TARGETS 32
+
+/* Snapshot of a single target's compositing work, collected under the device lock. */
+struct composite_snapshot
 {
-    struct composition_visual *root_visual, *content_visual;
+    HWND target_hwnd;
+    IUnknown *content; /* AddRef'd; caller must Release after use */
+    float offset_x;
+    float offset_y;
+};
+
+/* Reparent the swap chain's window into the target HWND so its Vulkan/Metal
+ * surface becomes visible. Called WITHOUT the device lock held. */
+static void do_composite_work(const struct composite_snapshot *work)
+{
     IDXGISwapChain *swapchain = NULL;
     DXGI_SWAP_CHAIN_DESC desc;
     HWND swap_hwnd;
     RECT rect;
     HRESULT hr;
 
-    if (!target->root)
-    {
-        TRACE("target %p has no root visual\n", target);
-        return;
-    }
-
-    root_visual = impl_from_IDCompositionVisual(target->root);
-    content_visual = find_content_visual(root_visual);
-    if (!content_visual)
-    {
-        TRACE("no visual with content found in tree for target %p\n", target);
-        return;
-    }
-
-    TRACE("found content visual %p with content %p for target hwnd %p\n",
-            content_visual, content_visual->content, target->hwnd);
-
-    hr = IUnknown_QueryInterface(content_visual->content, &IID_IDXGISwapChain, (void **)&swapchain);
+    hr = IUnknown_QueryInterface(work->content, &IID_IDXGISwapChain, (void **)&swapchain);
     if (FAILED(hr))
     {
-        FIXME("Visual content %p is not an IDXGISwapChain, hr %#lx\n", content_visual->content, hr);
+        FIXME("Visual content %p is not an IDXGISwapChain, hr %#lx\n", work->content, hr);
         return;
     }
 
     hr = IDXGISwapChain_GetDesc(swapchain, &desc);
+    IDXGISwapChain_Release(swapchain);
     if (FAILED(hr))
     {
         ERR("Failed to get swap chain desc, hr %#lx\n", hr);
-        IDXGISwapChain_Release(swapchain);
         return;
     }
 
     swap_hwnd = desc.OutputWindow;
     TRACE("swap chain window %p, size %ux%u, target hwnd %p\n",
-            swap_hwnd, desc.BufferDesc.Width, desc.BufferDesc.Height, target->hwnd);
-    IDXGISwapChain_Release(swapchain);
+            swap_hwnd, desc.BufferDesc.Width, desc.BufferDesc.Height, work->target_hwnd);
 
     if (!swap_hwnd || !IsWindow(swap_hwnd))
     {
@@ -186,17 +212,22 @@ static void do_composite(struct composition_target *target)
         return;
     }
 
-    /* Reparent the swap chain window into the target HWND.
-     * The swap chain renders via Vulkan/Metal to its window;
-     * by making it a child of the target, it appears in the right place. */
-    GetClientRect(target->hwnd, &rect);
+    /* If the swap chain was created directly for the target window (via __wine_dcomp_get_target_hwnd),
+     * the Vulkan surface is already on the right NSView — no reparenting needed. */
+    if (swap_hwnd == work->target_hwnd)
+    {
+        TRACE("swap chain window IS target hwnd %p, already rendering there\n", swap_hwnd);
+        return;
+    }
+
+    GetClientRect(work->target_hwnd, &rect);
     TRACE("reparenting swap hwnd %p into target hwnd %p, client rect %ldx%ld\n",
-            swap_hwnd, target->hwnd, rect.right - rect.left, rect.bottom - rect.top);
-    SetParent(swap_hwnd, target->hwnd);
+            swap_hwnd, work->target_hwnd, rect.right - rect.left, rect.bottom - rect.top);
+    SetParent(swap_hwnd, work->target_hwnd);
     SetWindowLongW(swap_hwnd, GWL_STYLE,
             (GetWindowLongW(swap_hwnd, GWL_STYLE) & ~WS_POPUP) | WS_CHILD | WS_VISIBLE);
     SetWindowPos(swap_hwnd, HWND_TOP,
-            (int)content_visual->offset_x, (int)content_visual->offset_y,
+            (int)work->offset_x, (int)work->offset_y,
             rect.right - rect.left, rect.bottom - rect.top,
             SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
 }
@@ -204,52 +235,57 @@ static void do_composite(struct composition_target *target)
 static DWORD WINAPI composite_thread_proc(void *param)
 {
     struct composition_device *device = impl_from_IDCompositionDevice((IDCompositionDevice *)param);
+    struct composite_snapshot snapshots[MAX_COMPOSITE_TARGETS];
     struct composition_target *target;
-    unsigned int count, iterations = 0;
+    unsigned int n, i;
 
     TRACE("compositor thread started for device %p\n", device);
 
-    while (TRUE)
+    /* Snapshot all targets that have content, under the device lock.
+     * We AddRef each content object so it stays alive after we drop the lock. */
+    n = 0;
+    EnterCriticalSection(&device->cs);
+    LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
     {
-        EnterCriticalSection(&device->cs);
+        struct composition_visual *root_visual, *content_visual;
 
-        count = 0;
-        LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
+        if (!target->root)
+            continue;
+
+        root_visual = impl_from_IDCompositionVisual(target->root);
+        content_visual = find_content_visual(root_visual);
+        if (!content_visual)
+            continue;
+
+        if (n < MAX_COMPOSITE_TARGETS)
         {
-            struct composition_visual *visual;
-
-            if (!target->root)
-            {
-                if (iterations == 0)
-                    TRACE("target %p (hwnd %p) has no root\n", target, target->hwnd);
-                continue;
-            }
-
-            visual = impl_from_IDCompositionVisual(target->root);
-            if (!find_content_visual(visual))
-            {
-                if (iterations == 0)
-                    TRACE("target %p (hwnd %p) has root but no content visual\n", target, target->hwnd);
-                continue;
-            }
-
-            do_composite(target);
-            count++;
+            snapshots[n].target_hwnd = target->hwnd;
+            snapshots[n].content = content_visual->content;
+            IUnknown_AddRef(snapshots[n].content);
+            snapshots[n].offset_x = content_visual->offset_x;
+            snapshots[n].offset_y = content_visual->offset_y;
+            n++;
         }
-
-        iterations++;
-
-        if (!count)
-        {
-            TRACE("compositor thread exiting after %u iterations (no content found)\n", iterations);
-            device->thread_exited = TRUE;
-            LeaveCriticalSection(&device->cs);
-            break;
-        }
-
-        LeaveCriticalSection(&device->cs);
-        Sleep(16); /* ~60fps */
     }
+    LeaveCriticalSection(&device->cs);
+
+    /* Perform all window operations outside the lock to avoid deadlock.
+     * SetParent/SetWindowPos send messages to the target window's thread,
+     * which may be blocked in Commit() trying to acquire device->cs. */
+    for (i = 0; i < n; i++)
+    {
+        do_composite_work(&snapshots[i]);
+        IUnknown_Release(snapshots[i].content);
+    }
+
+    if (!n)
+        TRACE("compositor thread: no content found\n");
+    else
+        TRACE("compositor thread: composited %u target(s)\n", n);
+
+    EnterCriticalSection(&device->cs);
+    device->thread_exited = TRUE;
+    LeaveCriticalSection(&device->cs);
 
     return 0;
 }

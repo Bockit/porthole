@@ -580,36 +580,40 @@ Port Zhiyi's code into our CX26 source tree, then extend it:
    - `AddVisual`, `RemoveVisual`, `RemoveAllVisuals`
 4. `IDCompositionDevice5` QI → return `E_NOINTERFACE` (CEF handles this gracefully)
 
-#### Phase 2: Composition Swap Chains (DXVK)
+#### Phase 2: Composition Swap Chains (Wine DXGI) — DONE
 
-**File to modify:**
-- `sources/dxvk/src/dxgi/dxgi_factory.cpp` — `CreateSwapChainForComposition`
+**File modified:**
+- `sources/wine/dlls/dxgi/factory.c` — `dxgi_factory_CreateSwapChainForComposition`
 
-**Approach**: Redirect `CreateSwapChainForComposition` to create a swap chain backed by a hidden helper window. DComp's `Commit()` (via BitBlt) will copy the rendered content to the real target HWND.
+**Note**: Originally planned to modify DXVK's `dxgi_factory.cpp`, but DXVK's dxgi.dll is NOT used — only `d3d11` and `d3d10core` are overridden via `WINEDLLOVERRIDES`. Wine's built-in dxgi handles swap chain creation and delegates to DXVK internally via `IWineDXGISwapChainFactory`.
+
+**Actual approach**: TLS-based HWND passing. DComp's `CreateTargetForHwnd` stores the target HWND in thread-local storage. When CEF calls `CreateSwapChainForComposition` on the same thread, Wine's dxgi reads the TLS value and calls `CreateSwapChainForHwnd` with the target HWND. This creates the Vulkan/Metal surface on the correct window from the start.
 
 ```
 CreateSwapChainForComposition(device, desc, output, &swapchain)
-  → Create hidden 1x1 HWND (or use a shared helper window)
-  → Call CreateSwapChainForHwnd(device, hidden_hwnd, desc, NULL, output, &swapchain)
-  → Return the swap chain (DXVK handles rendering to the hidden surface)
+  → Load dcomp.dll, call __wine_dcomp_get_target_hwnd()
+  → If TLS has target HWND:
+      → CreateSwapChainForHwnd(device, target_hwnd, desc, NULL, output, &swapchain)
+  → Else fallback:
+      → Create hidden WS_POPUP window
+      → CreateSwapChainForHwnd(device, hidden_hwnd, desc, NULL, output, &swapchain)
 ```
 
-DComp's `do_composite()` then reads from this swap chain's back buffer and BitBlts to the real window.
+#### Phase 3: Integration & Compositing Bridge — DONE
 
-#### Phase 3: Integration & Compositing Bridge
-
-The compositing pipeline (from Zhiyi's code, adapted):
+**Actual approach**: Window reparenting (NOT D2D1 + BitBlt). The compositor thread checks if the swap chain's output window matches the target HWND. If they match (TLS path), no work needed — MoltenVK already renders there. If they differ (fallback path), `SetParent` + `SetWindowPos` reparents the swap chain window into the target.
 
 ```
 Commit()
-  → Start compositor thread (if not running)
-  → Thread loop (at display refresh rate):
-      → For each target in device->targets:
-          → Get root visual's content (IDXGISwapChain1)
-          → Get swap chain's front buffer as IDXGISurface1
-          → Create D2D1 bitmap from the surface
-          → BitBlt to target HWND via GetDCEx
+  → Start one-shot compositor thread
+  → Thread snapshots all targets (under device lock)
+  → For each target with content:
+      → QI content for IDXGISwapChain → get OutputWindow
+      → If swap_hwnd == target_hwnd: nothing to do (already correct)
+      → Else: SetParent(swap_hwnd, target_hwnd) + SetWindowPos to fill client area
 ```
+
+This avoids the D2D1 dependency entirely and is much simpler than Zhiyi's approach.
 
 #### Phase 4: Build, Test, Iterate
 
@@ -654,13 +658,139 @@ This gives a fully automated pass/fail for the entire pipeline (DComp objects �
 
 ### Sequence
 
-1. [ ] Write automated test program (`tests/test_dcomp.c`)
-2. [ ] Phase 1: Implement DComp COM objects (Wine dcomp.dll)
-3. [ ] Verify test passes Phase 1 checks (device creation, QI, target/visual creation)
-4. [ ] Phase 2: Implement `CreateSwapChainForComposition` (DXVK)
-5. [ ] Phase 3: Implement compositing (Commit → BitBlt pipeline)
-6. [ ] Verify full automated test passes (pixel check)
-7. [ ] Test with Steam
+1. [x] Write automated test program (`tests/test_dcomp.c`) — 20/20 tests pass
+2. [x] Phase 1: Implement DComp COM objects (Wine dcomp.dll) — DONE
+3. [x] Verify test passes Phase 1 checks (device creation, QI, target/visual creation) — DONE
+4. [x] Phase 2: Implement `CreateSwapChainForComposition` — DONE (in Wine's dxgi/factory.c, NOT DXVK)
+5. [x] Phase 3: Implement compositing (Commit → reparenting pipeline) — DONE
+6. [x] Verify full automated test passes (pixel check) — 20/20 PASS (note: pixel check uses D3D11 staging texture readback, not GDI GetPixel which doesn't see Metal/Vulkan content on macOS)
+7. [ ] Test with Steam — **IN PROGRESS** (GPU process crash fixed, awaiting retest)
+
+### Implementation Details (2026-02-20/21)
+
+#### What Was Actually Built
+
+The implementation diverged from the original plan in several important ways:
+
+**Phase 2 — Composition Swap Chains**: Implemented in **Wine's dxgi/factory.c** (NOT DXVK's dxgi_factory.cpp), because `WINEDLLOVERRIDES="d3d11,d3d10core=n"` only overrides d3d11 and d3d10core — dxgi.dll is Wine's built-in. This turned out to be simpler and more correct.
+
+**Phase 3 — Compositing**: Instead of D2D1 + GDI BitBlt (Zhiyi's approach), we use **window reparenting** via `SetParent`. The swap chain's Vulkan/Metal surface is reparented into the target HWND so MoltenVK renders directly there. This avoids the D2D1 dependency entirely and is much more efficient.
+
+**TLS-based HWND passing**: `CreateTargetForHwnd` stores the target HWND in thread-local storage. `CreateSwapChainForComposition` (in Wine's dxgi) reads this TLS value and creates the swap chain directly for that HWND. This way MoltenVK attaches its CAMetalLayer to the correct NSView from the start — no reparenting needed when the swap chain window matches the target.
+
+#### Files Modified
+
+**Wine DComp (`sources/wine/dlls/dcomp/`):**
+- `device.c` — Full IDCompositionDevice + IDCompositionDesktopDevice implementation with TLS for target HWND, compositor thread, visual tree traversal
+- `target.c` — IDCompositionTarget with SetRoot, cross-process HWND support
+- `visual.c` — IDCompositionVisual2 with all methods returning S_OK (store offset, content, children)
+- `dcomp_private.h` — Shared structs and helpers
+- `dcomp.spec` — Exports DCompositionCreateDevice, DCompositionCreateDevice2, DCompositionCreateDevice3, __wine_dcomp_get_target_hwnd
+- `Makefile.in` — Added target.c, visual.c, user32 import
+
+**Wine DXGI (`sources/wine/dlls/dxgi/factory.c`):**
+- `CreateSwapChainForComposition` — Reads TLS target HWND from dcomp.dll, creates swap chain for that HWND. Falls back to hidden window if TLS is empty.
+
+#### DXVK Source Situation
+
+**Two DXVK sources exist — only one works on macOS:**
+
+| Source | Path | Works? | Notes |
+|--------|------|--------|-------|
+| CX26 bundled | `sources/dxvk/` | NO | Missing macOS/MoltenVK patches. Produces DLLs that cause wined3d GL fallback. |
+| Gcenx DXVK-macOS fork | `sources/dxvk-macos/` | YES | Cloned from `Gcenx/DXVK-macOS` tag `v1.10.3-20230507`. Has macOS-specific patches. |
+
+**DXVK build fixes applied:**
+- `sources/dxvk/src/util/config/config.h` — Added `#include <cstdint>` for MinGW GCC 15
+- `sources/dxvk/src/d3d10/d3d10_interfaces.h` — Added `#elif !defined(__d3d10effect_h__)` guard for UUID redefinition
+- `sources/dxvk-macos/` — Built with `-Denable_d3d9=false` to avoid struct redefinition with GCC 15
+
+**DXVK GetBuffer fix (`sources/dxvk-macos/src/d3d11/d3d11_swapchain.cpp`):**
+```cpp
+// Before: rejected BufferId > 0 with DXGI_ERROR_UNSUPPORTED
+// After: aliases all BufferIds to m_backBuffer (logs warning)
+if (BufferId > 0) {
+    Logger::warn(str::format("D3D11: GetImage: BufferId ", BufferId, " aliased to buffer 0"));
+}
+return m_backBuffer->QueryInterface(riid, ppBuffer);
+```
+CEF calls `GetBuffer(1)` for double-buffered rendering. DXVK only has one back buffer (MoltenVK limitation). Aliasing to buffer 0 lets CEF proceed.
+
+**DXVK build command:**
+```bash
+export PATH="x86brew/bin:$PATH"
+meson setup build/dxvk-macos-x64 sources/dxvk-macos \
+    --cross-file sources/dxvk-macos/build-win64.txt \
+    --buildtype release --strip -Denable_d3d9=false
+ninja -C build/dxvk-macos-x64
+```
+
+**Install only d3d11.dll** from the Gcenx build. Keep pre-built d3d10core.dll from `install_dxvk_download.sh`.
+
+#### Bugs Found and Fixed
+
+**1. DComp cross-process HWND rejection (CRITICAL — caused GPU process crash)**
+
+CEF uses separate processes: browser process owns the HWND, GPU process calls `CreateTargetForHwnd(browser_hwnd)`. Our implementation had:
+```c
+GetWindowThreadProcessId(hwnd, &pid);
+if (pid != GetCurrentProcessId())
+    return E_ACCESSDENIED;
+```
+On real Windows, `CreateTargetForHwnd` works cross-process. In Wine, cross-process HWND operations work via wineserver. Fix: replaced with `IsWindow(hwnd)` validation.
+
+**Symptoms**: GPU process crashed with `exit_code=-2147483645` (STATUS_BREAKPOINT), `c0000409` (STATUS_STACK_BUFFER_OVERRUN). CEF log showed "GPU process has crashed N time(s)". No DComp TRACE messages appeared because the crash happened immediately.
+
+**Diagnosis path**: Compared CEF logs between Feb 18 (no DComp, GPU process worked fine with ANGLE) and Feb 21 (DComp implemented, GPU process crashes). Realized our DComp made CEF take the DComp path, but the GPU process couldn't create a target for the browser's cross-process HWND.
+
+**2. CX26 DXVK produces non-functional DLLs on macOS**
+
+Initially built DXVK from the CX26 bundled source (`sources/dxvk/`). DLLs compiled but caused Wine to fall back to wined3d (GL_INVALID_OPERATION errors from glClientWaitSync). The Gcenx/DXVK-macOS fork has essential macOS/MoltenVK patches.
+
+**3. GDI GetPixel doesn't see Metal/Vulkan rendered content**
+
+Test pixel verification originally used `GetDC(hwnd) + GetPixel()`. On macOS Wine, GDI reads from the GDI backing store, not the Metal/Vulkan layer. Always returns white. Fix: use D3D11 staging texture readback (`CopyResource` + `Map` + read pixel from mapped buffer).
+
+### Current State (2026-02-21)
+
+**Installed files:**
+- `dcomp.dll` — Our implementation with cross-process HWND fix (both i386 and x86_64)
+- `d3d11.dll` — Gcenx DXVK-macOS build with GetBuffer fix (3.4MB stripped)
+- `d3d10core.dll` — Pre-built from Gcenx download (187K)
+- `dxgi.dll` — Wine's built-in with CreateSwapChainForComposition implementation
+
+**What should happen when Steam is tested:**
+1. `DCompositionCreateDevice3` → S_OK (our implementation)
+2. CEF GPU process `CreateTargetForHwnd(browser_hwnd)` → S_OK (cross-process fix)
+3. `CreateSwapChainForComposition` → creates swap chain for target HWND via TLS
+4. DXVK `GetBuffer(1)` → aliases to buffer 0 (no longer rejected)
+5. `Commit()` → compositor thread verifies swap chain window matches target
+6. Steam UI should render
+
+**Test command:**
+```bash
+WINEDEBUG=+dcomp ./run_wine.sh steam.exe -no-cef-sandbox
+```
+
+---
+
+## Next Steps
+
+1. [x] Build CrossOver 26 from source - DONE
+2. [x] Investigate ARM64 SIGKILL root cause - DONE
+3. [x] Install isolated x86 Homebrew - DONE
+4. [x] Install x86_64 build dependencies - DONE
+5. [x] Rebuild CX26 Wine as x86_64 - DONE
+6. [x] Verify Wine works - DONE
+7. [x] Test with display (Wine GUI) - DONE
+8. [x] Test Steam (black window) - DONE
+9. [x] Test Civ IV (32-bit) - DONE (Beyond the Sword runs!)
+10. [x] Implement DComp for Steam CEF rendering - DONE
+11. [x] Fix DXVK GetBuffer for CEF double-buffered rendering - DONE
+12. [x] Fix DComp cross-process HWND crash - DONE
+13. [ ] **Test Steam with all fixes** — awaiting retest
+14. [ ] Fix audio stuttering
+15. [ ] Decide on Porthole UI vs CLI
 
 ---
 
@@ -668,8 +798,11 @@ This gives a fully automated pass/fail for the entire pipeline (DComp objects �
 
 1. ~~Does cx-llvm work with CrossOver 26?~~ **Not needed** - CX26 uses upstream WoW64
 2. ~~Has CodeWeavers changed source structure?~~ **Yes** - Uses Wine 11.0, D3DMetal integrated
-3. ~~Are DXVK patches needed?~~ **Possibly** - Need to check sources/dxvk
-4. ~~Why does native ARM64 Wine get SIGKILL on macOS?~~ **Answered** - See "ARM64 Root Cause Analysis" above and `thoughts/shared/plans/2026-02-17-native-arm64-wine-macos.md`
-5. ~~Is x86_64 build (via Rosetta) more practical than native ARM64?~~ **Yes** - For now. Native ARM64 is a multi-month project, but will be necessary when Rosetta 2 is phased out (~macOS 27, fall 2026)
-6. ~~Will custom-prefix Homebrew successfully compile all needed x86 formulae from source?~~ **Yes** - All compiled successfully (p11-kit needed test skip, see local tap)
-7. ~~Does `cx-llvm` from Gcenx's tap build from source correctly?~~ **Not needed** - System gcc works fine for x86_64 builds
+3. ~~Are DXVK patches needed?~~ **Yes** - Must use Gcenx/DXVK-macOS fork, not CX26 bundled DXVK
+4. ~~Why does native ARM64 Wine get SIGKILL on macOS?~~ **Answered** - See "ARM64 Root Cause Analysis" above
+5. ~~Is x86_64 build (via Rosetta) more practical than native ARM64?~~ **Yes** - For now
+6. ~~Will custom-prefix Homebrew compile all needed x86 formulae?~~ **Yes**
+7. ~~Does `cx-llvm` from Gcenx's tap build correctly?~~ **Not needed** - System gcc works
+8. ~~Why does Steam's GPU process crash with our DComp?~~ **Answered** - Cross-process HWND rejection in CreateTargetForHwnd. Fixed.
+9. Will the TLS-based HWND passing work when CEF creates multiple swap chains on different threads? — **Unknown, test with Steam**
+10. Does MoltenVK correctly attach its CAMetalLayer when the swap chain is created for a cross-process HWND? — **Unknown, test with Steam**
