@@ -103,11 +103,20 @@ static HRESULT STDMETHODCALLTYPE device1_QueryInterface(IDCompositionDevice *ifa
         return S_OK;
     }
 
-    if (IsEqualGUID(iid, &IID_IDCompositionDevice3))
+    if (device->version >= 3 && IsEqualGUID(iid, &IID_IDCompositionDevice3))
     {
-        FIXME("IDCompositionDevice3 not implemented, returning E_NOINTERFACE.\n");
-        *out = NULL;
-        return E_NOINTERFACE;
+        /* Probe-only stub: returns the same IDCompositionDesktopDevice
+         * pointer. CEF asks for IDCompositionDevice3 existence before
+         * proceeding; without S_OK here it abandons DComp entirely
+         * (observed under Chrome 126.0.6478.183 in current Steam).
+         * If CEF ever calls a Device3-specific vtable slot via this
+         * pointer it will hit a wrong-vtable crash — accept that risk
+         * for now to learn whether the pipeline downstream is actually
+         * reachable. */
+        FIXME("IDCompositionDevice3 stub: returning IDCompositionDesktopDevice pointer.\n");
+        IUnknown_AddRef(&device->IDCompositionDesktopDevice_iface);
+        *out = &device->IDCompositionDesktopDevice_iface;
+        return S_OK;
     }
 
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));

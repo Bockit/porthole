@@ -17,6 +17,7 @@ struct Args {
     var titlePattern: String? = nil
     var ownerPattern: String? = nil
     var boundsOnly = false
+    var idOnly = false
 }
 
 func parseArgs() -> Args {
@@ -27,6 +28,7 @@ func parseArgs() -> Args {
         case "--title":  a.titlePattern = it.next()?.lowercased()
         case "--owner":  a.ownerPattern = it.next()?.lowercased()
         case "--bounds": a.boundsOnly = true
+        case "--id":     a.idOnly = true
         default:
             FileHandle.standardError.write(Data("unknown arg: \(arg)\n".utf8))
             exit(2)
@@ -71,6 +73,15 @@ for w in list {
 
     hits.append(Hit(id: id, owner: owner, title: title,
                     x: x, y: y, w: width, h: height, layer: layer))
+}
+
+if args.idOnly {
+    if let h = hits.first {
+        print("\(h.id)")
+        exit(0)
+    } else {
+        exit(1)
+    }
 }
 
 if args.boundsOnly {

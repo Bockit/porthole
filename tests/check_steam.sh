@@ -1,46 +1,67 @@
 #!/bin/bash
-# Detect whether the Steam window is currently rendering or black.
-# Captures a screenshot (full screen by default) and runs
-# check_pixels.py to classify.
+# Detect whether a Wine/Steam window is currently rendering or black.
 #
-# Usage: tests/check_steam.sh [--region X,Y,W,H] [--out path.bmp]
+# Captures the named window by CGWindowID (screencapture -l), which grabs
+# the window's own content regardless of stacking. Then runs
+# check_pixels.py to classify on Rec.601 luminance mean/stddev.
+#
+# Usage:
+#   tests/check_steam.sh                       # find window titled "Steam"
+#   tests/check_steam.sh --title "Special Offers"
+#   tests/check_steam.sh --id 15133            # capture a specific window
+#
 # Exit codes match check_pixels.py: 0 rendered, 1 black, 2 unclear/error.
+# Also prints capture path and verdict JSON to stderr.
 
 set -u
 
 PORTHOLE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-REGION=""
 TITLE="Steam"
-OUT="/tmp/porthole-steam-$(date +%Y%m%d-%H%M%S).bmp"
-AUTO_REGION=1
+OWNER=""
+WIN_ID=""
+OUT_BMP="/tmp/porthole-steam-$(date +%Y%m%d-%H%M%S-%N).bmp"
+OUT_PNG=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --region)  REGION="$2"; AUTO_REGION=0; shift 2 ;;
-        --title)   TITLE="$2"; shift 2 ;;
-        --no-auto) AUTO_REGION=0; shift ;;
-        --out)     OUT="$2"; shift 2 ;;
+        --title) TITLE="$2"; shift 2 ;;
+        --owner) OWNER="$2"; shift 2 ;;
+        --id)    WIN_ID="$2"; shift 2 ;;
+        --out)   OUT_BMP="$2"; shift 2 ;;
+        --png)   OUT_PNG="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 3 ;;
     esac
 done
 
-if [ "$AUTO_REGION" = "1" ] && [ -z "$REGION" ]; then
-    if [ -x "$PORTHOLE_DIR/tests/find_window" ]; then
-        REGION=$("$PORTHOLE_DIR/tests/find_window" --title "$TITLE" --bounds 2>/dev/null || true)
-        if [ -n "$REGION" ]; then
-            echo "[check_steam] auto-region for title='$TITLE': $REGION" >&2
-        else
-            echo "[check_steam] no window matched title='$TITLE', using full screen" >&2
-        fi
+if [ -z "$WIN_ID" ]; then
+    if [ ! -x "$PORTHOLE_DIR/tests/find_window" ]; then
+        echo "[check_steam] tests/find_window not built" >&2
+        exit 3
+    fi
+    FW_ARGS=(--title "$TITLE")
+    [ -n "$OWNER" ] && FW_ARGS=(--owner "$OWNER" "${FW_ARGS[@]}")
+    WIN_ID=$("$PORTHOLE_DIR/tests/find_window" "${FW_ARGS[@]}" --id 2>/dev/null || true)
+    if [ -z "$WIN_ID" ]; then
+        echo "[check_steam] no window matched title='$TITLE' owner='$OWNER'" >&2
+        exit 2
     fi
 fi
 
-screencapture -t bmp -x "$OUT" || { echo "screencapture failed" >&2; exit 3; }
+screencapture -t bmp -x -l "$WIN_ID" "$OUT_BMP" \
+    || { echo "[check_steam] screencapture -l $WIN_ID failed" >&2; exit 3; }
 
-ARGS=("$OUT")
-[ -n "$REGION" ] && ARGS+=(--region "$REGION")
+if [ ! -s "$OUT_BMP" ]; then
+    echo "[check_steam] capture is empty for window $WIN_ID" >&2
+    exit 3
+fi
 
-"$PORTHOLE_DIR/tests/check_pixels.py" "${ARGS[@]}"
+# Optional PNG companion for visual inspection.
+if [ -n "$OUT_PNG" ]; then
+    sips -s format png "$OUT_BMP" --out "$OUT_PNG" >/dev/null 2>&1 || true
+fi
+
+VERDICT_JSON=$("$PORTHOLE_DIR/tests/check_pixels.py" "$OUT_BMP")
 RC=$?
-echo "[check_steam] capture=$OUT verdict_rc=$RC" >&2
+echo "[check_steam] win=$WIN_ID bmp=$OUT_BMP rc=$RC json=$VERDICT_JSON" >&2
+echo "$VERDICT_JSON"
 exit $RC
