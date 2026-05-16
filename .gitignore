@@ -26,6 +26,8 @@ steamcmd/
 
 # Compiled test binaries
 tests/*.exe
+tests/find_window
+tests/logs/
 
 # RPI thoughts/
 thoughts/
