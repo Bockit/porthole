@@ -1,6 +1,5 @@
 /*
  * Copyright 2023 Zhiyi Zhang for CodeWeavers
- * Copyright 2026 Porthole contributors
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -20,20 +19,45 @@
 #define __WINE_DCOMP_PRIVATE_H
 
 #include "dcomp.h"
+#include "dcomp_private_iface.h"
+#include "d2d1_1.h"
+#include <d3d11.h>
 #include "wine/list.h"
-
-/* IDCompositionDevice3 is not in the CX26 IDL, define manually */
-DEFINE_GUID(IID_IDCompositionDevice3, 0x0987cb06, 0xf916, 0x48bf, 0x8d,0x35, 0xce,0x76,0x41,0x78,0x1b,0xd9);
 
 struct composition_device
 {
     IDCompositionDevice IDCompositionDevice_iface;
-    IDCompositionDesktopDevice IDCompositionDesktopDevice_iface;
-    CRITICAL_SECTION cs;
+    IDCompositionDeviceUnknown IDCompositionDeviceUnknown_iface;
+    IDCompositionSurfaceUnknown *drawing_surface;
     struct list targets;
     HANDLE thread;
+    BOOL exit_thread;
     BOOL thread_exited;
     int version;
+    LONG ref;
+};
+
+struct composition_surface_factory
+{
+    IDCompositionSurfaceFactory IDCompositionSurfaceFactory_iface;
+    IDCompositionDevice *device;
+    IUnknown *rendering_device;
+    GUID rendering_device_iid;
+    LONG ref;
+};
+
+struct composition_surface
+{
+    IDCompositionSurfaceUnknown IDCompositionSurfaceUnknown_iface;
+    IDCompositionSurfaceFactory *factory;
+    ID3D11Texture2D *draw_surface;
+    RECT draw_rect;
+    IUnknown *physical_surface;
+    GUID physical_surface_iid;
+    UINT width;
+    UINT height;
+    DXGI_FORMAT pixel_format;
+    DXGI_ALPHA_MODE alpha_mode;
     LONG ref;
 };
 
@@ -50,21 +74,22 @@ struct composition_target
 
 struct composition_visual
 {
-    IDCompositionVisual2 IDCompositionVisual2_iface;
+    IDCompositionVisualUnknown IDCompositionVisualUnknown_iface;
+    ID2D1GdiInteropRenderTarget *interop;
+    ID2D1DeviceContext *device_context;
     IUnknown *content;
-    struct list children;
-    struct list entry;
-    BOOL is_root;
+    GUID content_iid;
+    enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode;
+    enum DCOMPOSITION_BORDER_MODE border_mode;
+    enum DCOMPOSITION_BACKFACE_VISIBILITY visibility;
     float offset_x;
-    float offset_y;
+    struct list child_visuals; /* visuals closer to head are lower in z-order */
+    struct list entry;
+    struct composition_visual *parent;
+    BOOL is_root;
+    BOOL is_child;
     int version;
     LONG ref;
-};
-
-struct visual_child
-{
-    IDCompositionVisual2 *visual;
-    struct list entry;
 };
 
 static inline struct composition_device *impl_from_IDCompositionDevice(IDCompositionDevice *iface)
@@ -72,10 +97,27 @@ static inline struct composition_device *impl_from_IDCompositionDevice(IDComposi
     return CONTAINING_RECORD(iface, struct composition_device, IDCompositionDevice_iface);
 }
 
-static inline struct composition_device *impl_from_IDCompositionDesktopDevice(IDCompositionDesktopDevice *iface)
+static inline struct composition_device *impl_from_IDCompositionDeviceUnknown(IDCompositionDeviceUnknown *iface)
 {
-    return CONTAINING_RECORD(iface, struct composition_device, IDCompositionDesktopDevice_iface);
+    return CONTAINING_RECORD(iface, struct composition_device, IDCompositionDeviceUnknown_iface);
 }
+
+static inline struct composition_surface *impl_from_IDCompositionSurfaceUnknown(IDCompositionSurfaceUnknown *iface)
+{
+    return CONTAINING_RECORD(iface, struct composition_surface, IDCompositionSurfaceUnknown_iface);
+}
+
+static inline struct composition_surface *impl_from_IDCompositionSurface(IDCompositionSurface *iface)
+{
+    return CONTAINING_RECORD(iface, struct composition_surface, IDCompositionSurfaceUnknown_iface);
+}
+
+static inline struct composition_surface_factory *impl_from_IDCompositionSurfaceFactory(IDCompositionSurfaceFactory *iface)
+{
+    return CONTAINING_RECORD(iface, struct composition_surface_factory, IDCompositionSurfaceFactory_iface);
+}
+
+struct composition_surface *unsafe_impl_from_IDCompositionSurface(IDCompositionSurface *iface);
 
 static inline struct composition_target *impl_from_IDCompositionTarget(IDCompositionTarget *iface)
 {
@@ -84,20 +126,20 @@ static inline struct composition_target *impl_from_IDCompositionTarget(IDComposi
 
 static inline struct composition_visual *impl_from_IDCompositionVisual(IDCompositionVisual *iface)
 {
-    return CONTAINING_RECORD(iface, struct composition_visual, IDCompositionVisual2_iface);
+    return CONTAINING_RECORD(iface, struct composition_visual, IDCompositionVisualUnknown_iface);
 }
 
-static inline struct composition_visual *impl_from_IDCompositionVisual2(IDCompositionVisual2 *iface)
+static inline struct composition_visual *impl_from_IDCompositionVisualUnknown(IDCompositionVisualUnknown *iface)
 {
-    return CONTAINING_RECORD(iface, struct composition_visual, IDCompositionVisual2_iface);
+    return CONTAINING_RECORD(iface, struct composition_visual, IDCompositionVisualUnknown_iface);
 }
 
+void dcomp_lock(void);
+void dcomp_unlock(void);
+HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
+        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface);
+HRESULT create_surface_factory(struct composition_device *device, IUnknown *rendering_device, IDCompositionSurfaceFactory **factory);
 HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost, IDCompositionTarget **target);
 HRESULT create_visual(int version, REFIID iid, void **visual);
-
-/* Store the HWND of the most recently created composition target for this thread.
- * Called from create_target(); read by __wine_dcomp_get_target_hwnd() in factory.c
- * so that CreateSwapChainForComposition can create the swap chain for the right window. */
-void dcomp_set_current_target_hwnd(HWND hwnd);
 
 #endif /* __WINE_DCOMP_PRIVATE_H */

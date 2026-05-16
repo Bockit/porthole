@@ -1,6 +1,5 @@
 /*
  * Copyright 2023 Zhiyi Zhang for CodeWeavers
- * Copyright 2026 Porthole contributors
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -27,9 +26,12 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
+static const WCHAR *wine_window_topmost_composed = L"wine_window_topmost_composed";
+static const WCHAR *wine_window_non_topmost_composed = L"wine_window_non_topmost_composed";
+
 static HRESULT STDMETHODCALLTYPE target_QueryInterface(IDCompositionTarget *iface, REFIID iid, void **out)
 {
-    TRACE("iface %p, iid %s, out %p\n", iface, debugstr_guid(iid), out);
+    TRACE("iface %p, iid %s, out %p!\n", iface, debugstr_guid(iid), out);
 
     if (IsEqualGUID(iid, &IID_IUnknown)
             || IsEqualGUID(iid, &IID_IDCompositionTarget))
@@ -58,16 +60,18 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
     struct composition_target *target = impl_from_IDCompositionTarget(iface);
     ULONG ref = InterlockedDecrement(&target->ref);
     struct composition_visual *root_visual;
+    const WCHAR *prop;
 
     TRACE("iface %p, ref %lu.\n", iface, ref);
 
     if (!ref)
     {
-        struct composition_device *device = impl_from_IDCompositionDevice(target->device);
+        prop = target->topmost ? wine_window_topmost_composed : wine_window_non_topmost_composed;
+        RemovePropW(target->hwnd, prop);
 
-        EnterCriticalSection(&device->cs);
+        dcomp_lock();
         list_remove(&target->entry);
-        LeaveCriticalSection(&device->cs);
+        dcomp_unlock();
         IDCompositionDevice_Release(target->device);
         if (target->root)
         {
@@ -89,11 +93,16 @@ static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
 
     TRACE("iface %p, visual %p\n", iface, visual);
 
+    dcomp_lock();
+
     if (visual)
     {
         composition_visual = impl_from_IDCompositionVisual(visual);
         if (composition_visual->is_root)
+        {
+            dcomp_unlock();
             return E_INVALIDARG;
+        }
 
         composition_visual->is_root = TRUE;
         IDCompositionVisual_AddRef(visual);
@@ -106,6 +115,8 @@ static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
         IDCompositionVisual_Release(target->root);
     }
     target->root = visual;
+
+    dcomp_unlock();
     return S_OK;
 }
 
@@ -123,21 +134,28 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
         IDCompositionTarget **new_target)
 {
     struct composition_target *target;
+    const WCHAR *prop;
+    DWORD pid = 0;
 
     if (!hwnd || hwnd == GetDesktopWindow() || !new_target)
         return E_INVALIDARG;
 
-    if (!IsWindow(hwnd))
-        return E_INVALIDARG;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != GetCurrentProcessId())
+        return E_ACCESSDENIED;
+
+    if ((topmost && GetPropW(hwnd, wine_window_topmost_composed))
+            || (!topmost && GetPropW(hwnd, wine_window_non_topmost_composed)))
+        return DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED;
 
     target = calloc(1, sizeof(*target));
     if (!target)
         return E_OUTOFMEMORY;
 
     IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
-    EnterCriticalSection(&device->cs);
+    dcomp_lock();
     list_add_tail(&device->targets, &target->entry);
-    LeaveCriticalSection(&device->cs);
+    dcomp_unlock();
     target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
     target->ref = 1;
     target->hwnd = hwnd;
@@ -145,9 +163,7 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     target->device = &device->IDCompositionDevice_iface;
     *new_target = &target->IDCompositionTarget_iface;
 
-    /* Tell CreateSwapChainForComposition which window to render into on this thread. */
-    dcomp_set_current_target_hwnd(hwnd);
-    TRACE("set composition target hwnd %p for current thread\n", hwnd);
-
+    prop = target->topmost ? wine_window_topmost_composed : wine_window_non_topmost_composed;
+    SetPropW(target->hwnd, prop, (HANDLE)1);
     return S_OK;
 }
