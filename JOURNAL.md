@@ -134,4 +134,81 @@ Fix: Removed stale copies from prefix (renamed to `.old`). Wine will now load th
 WINEDEBUG=+dcomp ./run_wine.sh "$HOME/.porthole-wine/drive_c/Program Files (x86)/Steam/steam.exe" 2>&1 | tee ~/steam_exp5.log
 ```
 
-**Result:** (pending)
+**Result:** (pending — superseded by 2026-05-16 session below)
+
+---
+
+## 2026-05-16: Resume + wine-staging rebase + cloud-save trick
+
+Picked up after a ~2.5-month gap. Goal escalated from "fix Steam black window" to "render Steam well enough to accept StarRupture's EULA so a private-server save can hit Steam Cloud."
+
+### Detection harness
+
+Built `tests/check_pixels.py` (BMP luminance stats, no deps) + `tests/find_window.swift` (CGWindowListCopyWindowInfo, `--id`/`--bounds` modes) + `tests/check_steam.sh` (orchestrator) + `tests/repro_steam.sh` (kill old → launch with flags → sleep → leave running). Key trap: must capture window content with `screencapture -l <CGWindowID>`, NOT `-R x,y,w,h` of the display — otherwise stacked apps show through and you misread a black window as "rendered."
+
+### Path B: CEF launch flags — all-strikeout
+
+Tested `-cef-disable-d3d11`, `-cef-disable-gpu`, `-cef-force-gl`, `-vgui`. All produced solid-black `mean=0 stddev=0` window content captured by ID. The most revealing one: `-cef-disable-gpu` had **zero dcomp traces** in the log (CEF skipped the whole D3D11/DComp path) yet the window was still black. Proved the black window isn't *only* caused by missing DComp — CEF's non-GPU fallback is also broken on Wine/macOS.
+
+### Discovery: our DComp wasn't actually running
+
+Log diff of baseline E0 showed CEF calls `DCompositionCreateDevice3` → gets `IDCompositionDesktopDevice` → `QueryInterface(IID_IDCompositionDevice3)` → our `device.c:106-110` returned `E_NOINTERFACE` → CEF released the device and abandoned DComp entirely. Total of 8 trace lines, no `CreateTarget`/`CreateVisual`/`SetContent`/`Commit`. **None of our hand-port compositor/reparenting code was being exercised in production.** Steam's CEF has updated to Chrome 126.0.6478.183 since Feb 26; current CEF treats missing Device3 as fatal.
+
+Diagnostic fix: 3-line change to return the existing `IDCompositionDesktopDevice` pointer for `IID_IDCompositionDevice3` QI. After this, CEF executed the full pipeline — 5-level visual tree, SetContent with real swap chains, Commit, compositor thread fired, reparenting attempted. **But all Wine windows ended up `onScreen=false` in CGWindowList.** Reparenting via `SetParent` works at the Win32 level but breaks winemac.drv NSWindow visibility — confirming HANDOVER.md problem 3 prediction.
+
+Committed the QI fix as `2117952` on `bugfix/steam-black-window`, then merged the bugfix branch to main and pushed.
+
+### Pivot to wine-staging 11.6 rebase
+
+Wine-staging 11.6 (April 2026) ships 65 patches from Zhiyi Zhang implementing a proper DComp (`dlls/dcomp/` device/target/visual/surface + dxgi factory tweak + tests). Uses **D2D1-backed IDCompositionSurface + ID3D11Texture2D** for compositing instead of reparenting hidden swap-chain windows — fundamentally different strategy, more likely to work on macOS.
+
+Procedure:
+1. Sparse-cloned wine-staging, downloaded Wine 11.7 tarball, applied patches via `patch -p1` to a temp Wine 11.7 tree (all 65 applied cleanly).
+2. Reverted patch 0062 (shared visual handle — requires wineserver protocol changes, breaks single-DLL rebuild).
+3. Copied resulting `dlls/dcomp/*` (Makefile.in, dcomp.spec, dcomp_private.h, dcomp_private_iface.idl, device.c, surface.c, target.c, visual.c) into our CX26 tree.
+4. Kept our own `dlls/dxgi/factory.c` (the TLS+hidden-window hack — wine-staging's version is just an `E_NOTIMPL` stub).
+5. `arch -x86_64 /bin/bash` for `config.status` to regenerate Makefiles (must avoid arm64 brew bash — `Bad CPU type in executable`).
+6. `rebuild_dll.sh dlls/dcomp` → install → cp into prefix system32/syswow64.
+
+### Three macOS/CX26-specific deltas needed on top of wine-staging
+
+1. **IDCompositionDevice3 QI**: wine-staging's `device_QueryInterface` rejects `IID_IDCompositionDevice3`. Same fix as before — return the v2 `IDCompositionDeviceUnknown_iface` pointer when gated on `device->version >= 3`. Added the GUID via `DEFINE_GUID` at top of device.c (wine-staging's dcomp_private.h doesn't declare it).
+
+2. **`visual_Set*` soft-stubs**: 11 setters (SetOffsetY, SetOffsetX/YAnimation, SetTransform/Object/Parent, SetEffect, SetClip/Object, SetCompositeMode) return `E_NOTIMPL` upstream. CEF wraps these in `CHECK_EQ(S_OK)` and aborts visual setup on any failure — without this CEF builds the tree skeleton but never calls SetContent. Python regex replace, S_OK + soft-stub comment.
+
+3. **`do_composite` GetBuffer**: wine-staging's compositor asks for `IDXGISwapChain_GetBuffer(swapchain, BufferCount - 1, IID_IDXGISurface, ...)` (the flip-sequential front buffer). DXVK on macOS has only one buffer and rejects any non-zero index with `DXGI_ERROR_UNSUPPORTED`. Changed to index 0 (current back buffer where DXVK draws the latest frame).
+
+After these three deltas: Steam Store renders cleanly. mean=58, stddev=44. Committed as `da51a4a` on `feat/dcomp-staging-rebase` (pushed to origin, NOT merged to main).
+
+### Civ IV regression
+
+Launched via Steam library (previously only direct-launch was documented). Renders fine, in-game menus visible, Steam Overlay overlays correctly (friend notifications visible). Save-load dialog renders; pressing Enter triggers an `_invalid_parameter` runtime error, clicking Load works — unrelated keyboard-handler quirk in Civ IV, not a regression.
+
+### StarRupture: library, download, launch, crash
+
+- **Library scan**: Steam didn't see SteamCMD-installed games until we added the SteamCMD path as library "1" in `Steam/steamapps/libraryfolders.vdf` with the path `Z:\Users\james\personal\porthole\steamcmd`.
+- **Download into the Z: library was slow**: disk-write throughput didn't keep up with network throughput. Steam appeared to crash + auto-relaunch (without our `-no-cef-sandbox` flag, so the relaunch came up black). Mitigation: install games into the prefix's own C: library instead, or accept a slower download into Z:.
+- **Launched**: reached main menu map (`LogNet: Browse: /Game/Chimera/Maps/Map_MainMenu`), Steamworks/EOS SDK initialized, then `EXCEPTION_ACCESS_VIOLATION writing address 0x0000000000000000` 21s in — null deref, not Wine-specific by signature. Subsequent launch showed pink textures + invisible pause menu — Streamline (NVIDIA) and DXVK shader-model gaps. **Game is not playably renderable on Wine, but launches far enough for Steamworks Cloud init.**
+
+### Steam Cloud upload trick (for the GFN workflow)
+
+User wanted to push a private-server save (`~/Downloads/StarRupture/Saved/SaveGames/StarRuptureServer/AutoSave0.{met,sav}`) up to Steam Cloud so a GFN session could pull it down. **Steam Cloud does NOT auto-discover files dropped into `userdata/<id>/<appid>/remote/`.** Three failed approaches confirmed:
+1. `steam.exe -shutdown` (kills steam.exe but doesn't trigger a re-scan of the local remote dir)
+2. Delete `remotecache.vdf` and let Steam regenerate it (Steam regenerates from the server-side cloud manifest, not from local-disk scan — strips any unknown entries)
+3. Hand-seed `remotecache.vdf` with `syncstate=2` entries (Steam strips them on the next manifest write, both at startup and while running)
+
+**Working trick**: overwrite the contents of an **already-tracked** slot (we used `JamesSingle/AutoSave0.{met,sav}`) with the new save's bytes. On next Steam launch, Steam stats local files, sees the SHA1 differ from the manifest, marks `syncstate=2`, uploads to cloud. ChangeNumber bumps; remotetime updates. Verified at `https://store.steampowered.com/account/remotestorageapp/?appid=1631270`. GFN session then pulled the modified bytes down and loaded successfully into the JamesSingle slot.
+
+Tradeoff: lose the `StarRuptureServer` slot label. The save state itself transfers cleanly.
+
+The fundamental constraint: only the game can register a new slot path with Steam Cloud, via `ISteamRemoteStorage::FileWrite`. There is no documented or undocumented external mechanism to introduce a new path.
+
+### Unfinished / followups
+
+- `feat/dcomp-staging-rebase` pushed but not merged to main. Main HEAD `2117952` is still the hand-port + Device3 QI stub. PR or fast-forward when ready.
+- `test_dcomp.dxvk-cache` (12 B binary) is in the WIP-commit tree and shouldn't be. Trivial cleanup commit.
+- `tests/test_dcomp.c` / `tests/test_dcomp_minimal.c` not re-verified against the wine-staging port; internals differ slightly.
+- HANDOVER.md, PLAN.md still describe the hand-port + reparenting architecture. Stale — needs rewrite or "AS-OF" addendum.
+- `run_wine.sh` / `repro_steam.sh` don't reap orphan wine services on Steam crash; manual `pkill` needed. Could harden.
+- StarRupture pink-textures + invisible-menus: separate rendering bug downstream of DComp. Not regression, not currently a goal (GFN handles play).
+- Civ IV's "press Enter on save dialog" runtime error: unrelated keyboard-handler quirk. Click-to-Load works.
